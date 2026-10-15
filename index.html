@@ -2000,6 +2000,18 @@ function poolPeriod(rows,period){ if(!rows||!rows.length)return[]; if(period==='
 function computeHR(rows,get,step){ let hits=0,sum=0; for(const r of rows){const v=get(r)||0;sum+=v;if(v>=step.v)hits++;} return {n:rows.length,hits,pct:rows.length?hits/rows.length:null,sum}; }
 // per-GAME strike rate: for each opponent game (date), take the best position player's value; count games where a position player reached the milestone
 function poolHR(rows,sk,step){ const getv=STATS[sk].pget; const by={}; for(const r of rows){const d=r[PI.date];const v=getv(r)||0;by[d]=(d in by)?Math.max(by[d],v):v;} const vals=Object.values(by); let hits=0,sum=0;for(const v of vals){sum+=v;if(v>=step.v)hits++;} return {n:vals.length,hits,pct:vals.length?hits/vals.length:null,sum}; }
+// position-vs-opponent pool hit-rate for the stats-tab "Pos vs Opp" factor (mirrors the player modal's PvO row)
+function pvoPoolHR(pid,pos,oppShort,sk,tab,period,qMode){
+  if(qMode||!tab||tab.ptd) return null;
+  const bucket=POS_BUCKET[pos]; if(!bucket) return null;
+  if(!STATS[sk]||!STATS[sk].pget) return null;
+  if(!['passYds','passTds','passCmp','passAtt','int','rushYds','rushAtt','rec','recYds','recLong','td'].includes(sk)) return null;
+  const poolThr=tab.ou?(tab.line!=null?tab.line:playerLine(pid,sk)):tab.v;
+  if(poolThr==null) return null;
+  const poRows=poolPeriod((POSOPP[oppShort]&&POSOPP[oppShort][bucket])||[],period);
+  if(!poRows.length) return null;
+  return poolHR(poRows,sk,{v:poolThr});
+}
 
 // ---- controls ----
 function Seg({items,value,onChange,cls,style}){ return html`<div className=${'seg '+(cls||'')} style=${style||null}>${items.map(([v,l])=>html`<button key=${v} className=${value===v?'on':''} onClick=${()=>onChange(v)}>${l}</button>`)}</div>`; }
@@ -2009,13 +2021,16 @@ function ThreshSlider({sk,idx,setIdx}){ const {steps}=stepsOf(sk); const cur=ste
     <input type="range" min="0" max=${steps.length-1} step="1" value=${idx} onInput=${e=>setIdx(+e.target.value)} onChange=${e=>setIdx(+e.target.value)} className="slider"/></div>`; }
 
 // ---- player tile ----
-function PlayerTile({p, sk, tab, period, side, onOpen, fantasy, factorPred, qN, fanColor}){
+function PlayerTile({p, sk, tab, period, side, onOpen, fantasy, factorPred, factorKey, oppShort, qN, fanColor}){
   const qMode=qN>0;
   const rows=factorRows(p.gl, factorPred||(()=>true), period); // filter by factor first, then take last-N
   const ptdMap=(sk==='td')?tdPtdMap(p.pid):null;
   const fanMode=tab&&(tab.avg||tab.proj);
   let hits=0; const n=rows.length; if(!fanMode) rows.forEach(r=>{if(qMode?qTileHit(sk,tab,r,p.pid,qN):tileHit(sk,tab,r,p.pid,ptdMap))hits++;});
   const hr={n,hits,pct:n?hits/n:null};
+  // "Pos vs Opp" factor: show the opponent's position-concede pool hit-rate instead of the player's own games
+  if(factorKey==='pvo'&&!fantasy){ const po=pvoPoolHR(p.pid,p.pos||'WR',oppShort,sk,tab,period,qMode);
+    if(po&&po.pct!=null){hr.n=po.n;hr.hits=po.hits;hr.pct=po.pct;} else {hr.n=0;hr.hits=0;hr.pct=null;} }
   let fanVal=null;
   if(fanMode){ if(tab.proj){ const fp=FPROJ[p.pid]; fanVal=fp?fp[sk==='scPts'?'sc':'sl']:null; }
     else { const vv=rows.map(r=>STATS[sk].get(r)).filter(x=>x!=null); fanVal=vv.length?vv.reduce((a,b)=>a+b,0)/vv.length:null; } }
@@ -2100,9 +2115,12 @@ function StatsTab({game, onOpen, statOrder, initStat, fantasy}){
   function changeTime(t){setTime(t);const qm=t!=='match';const s=(qm&&!QSTATS.includes(sk))?(statOrder.filter(k=>QSTATS.includes(k))[0]||'td'):sk;setSk(s);pickTab(qm?qStatTabs(s):statTabs(s));}
   function Column({sideKey}){
     const teamShort=sideKey==='home'?game.home:game.away;
+    const oppShort=sideKey==='home'?game.away:game.home;
     let list=Object.values(game.players).filter(p=>p.team===sideKey&&p.gl&&p.gl.length&&(fantasy||(STATS[skEff]&&STATS[skEff].noOdds)||(qMode?qHasOdds(p.pid,skEff,qN):hasOdds(p.pid,skEff))));
     list.forEach(p=>{p._home=game.home;p._away=game.away;});
-    const rankFor=p=>{const rows=factorRows(p.gl,statFacPred(game,p,factor),period); // last-N of the filtered factor
+    const rankFor=p=>{
+      if(factor==='pvo'&&!fantasy){const po=pvoPoolHR(p.pid,p.pos||'WR',oppShort,skEff,tab,period,qMode);return po&&po.pct!=null?po.pct:-1;}
+      const rows=factorRows(p.gl,statFacPred(game,p,factor),period); // last-N of the filtered factor
       if(fantasy&&tab&&tab.proj){const fp=FPROJ[p.pid];return fp?(fp[skEff==='scPts'?'sc':'sl']||0):-1;}
       if(!rows.length)return -1;
       if(tab&&tab.avg){const vv=rows.map(r=>STATS[skEff].get(r)).filter(x=>x!=null);return vv.length?vv.reduce((a,b)=>a+b,0)/vv.length:-1;}
@@ -2117,14 +2135,14 @@ function StatsTab({game, onOpen, statOrder, initStat, fantasy}){
       <div className="tcol-h" style=${{background:`linear-gradient(${isHomeCol?'270deg':'90deg'},${hexA(cc,0.92)},${hexA(cc,0.35)})`,color:txtOn(cc),display:'flex',alignItems:'center',gap:6,padding:'7px 10px',borderRadius:8,marginBottom:8,justifyContent:isHomeCol?'flex-end':'flex-start'}}>
         ${isHomeCol?html`<b>${nick(teamShort)}</b> <${Badge} s=${teamShort} cls="xs"/>`:html`<${Badge} s=${teamShort} cls="xs"/> <b>${nick(teamShort)}</b>`}</div>
       <div style=${{display:'flex',flexDirection:'column',gap:5}}>
-        ${list.length?list.map(o=>html`<${PlayerTile} key=${o.p.name} p=${o.p} sk=${skEff} tab=${tab} period=${period} side=${sideKey} onOpen=${fantasy?((pp)=>onOpen(pp,{period,factor})):((pp,sk2,thr2)=>onOpen(pp,sk2,thr2,game,(STATS[skEff]&&STATS[skEff].noOdds)?'all':(factor==='all'?null:factor),period))} fantasy=${fantasy} factorPred=${statFacPred(game,o.p,factor)} qN=${qN} fanColor=${fanColor}/>`):html`<div className="sub" style=${{padding:12,textAlign:'center'}}>No players with ${qMode?('Q'+qN+' '):''}${STATS[skEff].short} odds.</div>`}
+        ${list.length?list.map(o=>html`<${PlayerTile} key=${o.p.name} p=${o.p} sk=${skEff} tab=${tab} period=${period} side=${sideKey} onOpen=${fantasy?((pp)=>onOpen(pp,{period,factor})):((pp,sk2,thr2)=>onOpen(pp,sk2,thr2,game,(STATS[skEff]&&STATS[skEff].noOdds)?'all':(factor==='all'?null:factor),period))} fantasy=${fantasy} factorPred=${statFacPred(game,o.p,factor)} factorKey=${factor} oppShort=${oppShort} qN=${qN} fanColor=${fanColor}/>`):html`<div className="sub" style=${{padding:12,textAlign:'center'}}>No players with ${qMode?('Q'+qN+' '):''}${STATS[skEff].short} odds.</div>`}
       </div>
     </div>`;
   }
   const items = shownStats.map(k=>[k,STATS[k].short]);
   const facItems=fantasy
     ?[['all','All'],['h2h','H2H'],['ha',(game.fac&&game.fac.intl)?"H/A·Int'l":'H/A'],['fav','Fav/Und'],['dn','Day/Night']]
-    :[['all','All'],['h2h','H2H'],['ha',(game.fac&&game.fac.intl)?"Int'l":'H/A'],['fav','Fav/Und']];
+    :[['all','All'],['h2h','H2H'],['ha',(game.fac&&game.fac.intl)?"Int'l":'H/A'],['fav','Fav/Und'],['pvo','Pos vs Opp']];
   const timeItems=[['match','Match'],['q1','Q1'],['q2','Q2'],['q3','Q3'],['q4','Q4']];
   return html`<div>
     <div className="ctrls" style=${{display:'flex',flexWrap:'wrap',gap:'8px',justifyContent:'center',marginBottom:6}}>
@@ -2749,7 +2767,7 @@ function PlayerModal({p, game, initStat, initThr, initFactor, initPeriod, onClos
   const factorList=playerFactors(p,game).map(f=>{const fr=factorRows(p.gl,f.pred,period);return {...f,fr,hr:qMode?computeHRq(fr,tab,sk,p.pid,qN):computeHRt(fr,tab,ptdMap)};}).filter(c=>c.fr.length);
   const facById={}; factorList.forEach(c=>{facById[c.fid]=c;});
   const rf=(fid)=>{const c=facById[fid];return c?html`<${FactorRow} key=${c.fid} fid=${c.fid} initOpen=${openFactor===c.fid} label=${c.label} desc=${desc(c.hr)} hr=${c.hr} mode="own" rows=${c.fr} sk=${sk} tab=${tab} ptdMap=${ptdMap} base=${base} grp=${grp} qN=${qN} pid=${p.pid}/>`:'';};
-  const poolPVO=poolOK?html`<${FactorRow} key="pvo" label=${POS_PLURAL[pos]+' vs '+nick(oppShort)} desc=${desc(hrPO)} hr=${hrPO} mode="pool" poShow="team" rows=${poRows} sk=${sk} tab=${tab} poolThr=${poolThr} base=${base} grp=${grp}/>`:'';
+  const poolPVO=poolOK?html`<${FactorRow} key="pvo" initOpen=${openFactor==='pvo'} label=${POS_PLURAL[pos]+' vs '+nick(oppShort)} desc=${desc(hrPO)} hr=${hrPO} mode="pool" poShow="team" rows=${poRows} sk=${sk} tab=${tab} poolThr=${poolThr} base=${base} grp=${grp}/>`:'';
   const poolTP=poolOK?html`<${FactorRow} key="tp" label=${nick(teamShort)+' '+POS_PLURAL[pos]} desc=${desc(hrTP)} hr=${hrTP} mode="pool" poShow="opp" rows=${tpRows} sk=${sk} tab=${tab} poolThr=${poolThr} base=${base} grp=${grp}/>`:'';
   const RINJ=RED_INJ.has(p.inj), YINJ=YEL_INJ.has(p.inj);
   const statusTxt = RINJ?p.inj.toUpperCase() : (YINJ?(p.inj==='Probable'?'Likely':'Ques') : 'Fit');
